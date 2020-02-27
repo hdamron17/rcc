@@ -85,7 +85,7 @@ fn real_main(
     buf: Rc<str>,
     file_db: &mut Files,
     file_id: FileId,
-    opt: &BinOpt,
+    opt: BinOpt,
     output: &Path,
 ) -> Result<(), Error> {
     env_logger::init();
@@ -93,7 +93,7 @@ fn real_main(
     let opt = if opt.preprocess_only {
         use std::io::{BufWriter, Write};
 
-        let (tokens, warnings) = preprocess(&buf, &opt.opt, file_id, file_db);
+        let (tokens, warnings) = preprocess(&buf, opt.opt, file_id, file_db);
         handle_warnings(warnings, file_db);
 
         let stdout = io::stdout();
@@ -174,8 +174,9 @@ fn main() {
     let mut file_db = Files::new();
     // TODO: remove `lossy` call
     let file_id = file_db.add(opt.filename.to_string_lossy(), source);
-    real_main(buf, &mut file_db, file_id, &opt, &output)
-        .unwrap_or_else(|err| err_exit(err, opt.opt.max_errors, &file_db));
+    let max_errors = opt.opt.max_errors;
+    real_main(buf, &mut file_db, file_id, opt, &output)
+        .unwrap_or_else(|err| err_exit(err, max_errors, &file_db));
 }
 
 fn os_str_to_path_buf(os_str: &OsStr) -> Result<PathBuf, bool> {
@@ -188,6 +189,9 @@ macro_rules! type_sizes {
     };
 }
 fn parse_args() -> Result<(BinOpt, PathBuf), pico_args::Error> {
+    use rcc::data::lex::{Literal, Token};
+    use std::collections::HashMap;
+
     let mut input = Arguments::from_env();
     if input.contains(["-h", "--help"]) {
         println!("{}", HELP);
@@ -228,6 +232,18 @@ fn parse_args() -> Result<(BinOpt, PathBuf), pico_args::Error> {
     {
         search_path.push(include);
     }
+    let mut definitions = HashMap::new();
+    while let Some(arg) = input.opt_value_from_str::<_, String>(["-D", "--define"])? {
+        use std::convert::TryInto;
+
+        let mut iter = arg.splitn(2, '=');
+        let key = iter.next().unwrap();
+        let val = iter.next().unwrap_or("1");
+        let def = val
+            .try_into()
+            .expect("error handling for defines not implemented");
+        definitions.insert(key.into(), def);
+    }
     Ok((
         BinOpt {
             preprocess_only: input.contains(["-E", "--preprocess-only"]),
@@ -237,6 +253,7 @@ fn parse_args() -> Result<(BinOpt, PathBuf), pico_args::Error> {
                 debug_ast: input.contains(["-a", "--debug-ast"]),
                 no_link: input.contains(["-c", "--no-link"]),
                 max_errors,
+                definitions,
                 search_path,
             },
             filename: input

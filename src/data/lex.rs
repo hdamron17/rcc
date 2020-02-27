@@ -25,7 +25,19 @@ impl<T> Locatable<T> {
             location: self.location,
         }
     }
+    // this can't be `impl Into` because of the orphan rule
+    pub fn into<S: From<T>>(self) -> Locatable<S> {
+        self.map(Into::into)
+    }
 }
+
+/*
+impl<T, S: Into<T>> From<Locatable<S>> for Locatable<T> {
+    fn from(existing: Locatable<S>) -> Self {
+        existing.map(Into::into)
+    }
+}
+*/
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Keyword {

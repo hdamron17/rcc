@@ -10,11 +10,98 @@ use codespan::FileId;
 
 use super::{Lexer, Token};
 use crate::arch::TARGET;
-use crate::data::error::CppError;
+use crate::data::error::{CppError, LexError};
 use crate::data::lex::{Keyword, Literal};
 use crate::data::prelude::*;
 use crate::get_str;
 use crate::Files;
+
+pub struct PreProcessorBuilder<'a> {
+    /// The buffer for the starting file
+    buf: Rc<str>,
+    /// The starting file
+    file: FileId,
+    /// All known files, including files which have already been read.
+    files: &'a mut Files,
+    /// Whether to print each token before replacement
+    debug: bool,
+    /// Note that this is a simple HashMap and not a Scope, because
+    /// the preprocessor has no concept of scope other than `undef`
+    definitions: HashMap<InternedStr, Definition>,
+    /// The paths to search for `#include`d files
+    search_path: Vec<Cow<'a, Path>>,
+}
+
+impl<'a> PreProcessorBuilder<'a> {
+    pub fn new<S: Into<Rc<str>>>(
+        buf: S,
+        file: FileId,
+        files: &'a mut Files,
+    ) -> PreProcessorBuilder<'a> {
+        PreProcessorBuilder {
+            debug: false,
+            files,
+            file,
+            buf: buf.into(),
+            definitions: HashMap::new(),
+            search_path: Vec::new(),
+        }
+    }
+    pub fn debug(mut self, yes: bool) -> Self {
+        self.debug = yes;
+        self
+    }
+    pub fn definition<K: Into<InternedStr>>(mut self, key: K, val: &str) -> Result<Self, LexError> {
+        use std::convert::TryInto;
+        self.definitions.insert(key.into(), val.try_into()?);
+        Ok(self)
+    }
+    pub fn definition_from_token<K: Into<InternedStr>, V: Into<Definition>>(
+        mut self,
+        key: K,
+        val: V,
+    ) -> Self {
+        self.definitions.insert(key.into(), val.into());
+        self
+    }
+    pub fn search_path<C: Into<Cow<'a, Path>>>(mut self, path: C) -> Self {
+        self.search_path.push(path.into());
+        self
+    }
+    pub fn build(self) -> PreProcessor<'a> {
+        PreProcessor::new(
+            self.file,
+            self.buf,
+            self.debug,
+            self.search_path,
+            self.definitions,
+            self.files,
+        )
+    }
+}
+
+impl From<Vec<Token>> for Definition {
+    fn from(tokens: Vec<Token>) -> Definition {
+        Definition::Object(tokens)
+    }
+}
+
+impl TryFrom<&str> for Definition {
+    type Error = LexError;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let value = Rc::from(format!("{}\n", value));
+        let mut files = codespan::Files::new();
+        let dummy_id = files.add("<impl TryFrom<&str> for Definition>", Rc::clone(&value));
+        let lexer = Lexer::new(dummy_id, value, false);
+        lexer
+            .map(|res| match res {
+                Ok(loc) => Ok(loc.data),
+                Err(err) => Err(err.data),
+            })
+            .collect::<Result<_, _>>()
+            .map(Definition::Object)
+    }
+}
 
 /// A preprocessor does textual substitution and deletion on a C source file.
 ///
@@ -66,12 +153,18 @@ pub struct PreProcessor<'a> {
     search_path: Vec<Cow<'a, Path>>,
 }
 
-enum Definition {
+pub enum Definition {
     Object(Vec<Token>),
     Function {
         params: Vec<InternedStr>,
         body: Vec<Token>,
     },
+}
+
+impl From<Token> for CppToken {
+    fn from(t: Token) -> CppToken {
+        CppToken::Token(t)
+    }
 }
 
 /// Keeps track of the state of a conditional inclusion directive.
@@ -166,7 +259,7 @@ impl<'a> PreProcessor<'a> {
             return Some(Ok(replacement));
         }
         match self.lexer_mut().next()? {
-            Err(err) => Some(Err(err)),
+            Err(err) => Some(Err(err.map(Into::into))),
             Ok(token) => Some(Ok(token)),
         }
     }
@@ -193,7 +286,11 @@ impl<'a> PreProcessor<'a> {
     }
     #[inline]
     fn next_token(&mut self) -> Option<CppResult<Token>> {
-        self.lexer_mut().next()
+        match self.lexer_mut().next() {
+            Some(Err(err)) => Some(Err(err.into())),
+            Some(Ok(ok)) => Some(Ok(ok)),
+            None => None,
+        }
     }
     #[inline]
     fn span(&self, start: u32) -> Location {
@@ -247,6 +344,7 @@ impl<'a> PreProcessor<'a> {
         chars: S,
         debug: bool,
         user_search_path: I,
+        user_definitions: HashMap<InternedStr, Definition>,
         files: &'files mut Files,
     ) -> Self {
         let system_path = format!(
@@ -254,6 +352,19 @@ impl<'a> PreProcessor<'a> {
             TARGET.architecture, TARGET.operating_system, TARGET.environment
         );
         let int = |i| Definition::Object(vec![Token::Literal(Literal::Int(i))]);
+
+        let mut definitions = map! {
+            format!("__{}__", TARGET.architecture).into() => int(1),
+            format!("__{}__", TARGET.operating_system).into() => int(1),
+            "__STDC__".into() => int(1),
+            "__STDC_HOSTED__".into() => int(1),
+            "__STDC_VERSION__".into() => int(2011_12),
+            "__STDC_NO_ATOMICS__".into() => int(1),
+            "__STDC_NO_COMPLEX__".into() => int(1),
+            "__STDC_NO_THREADS__".into() => int(1),
+            "__STDC_NO_VLA__".into() => int(1),
+        };
+        definitions.extend(user_definitions);
         let mut search_path = vec![
             PathBuf::from(format!("/usr/local/include/{}", system_path)).into(),
             Path::new("/usr/local/include").into(),
@@ -265,20 +376,10 @@ impl<'a> PreProcessor<'a> {
         Self {
             first_lexer: Lexer::new(file, chars, debug),
             includes: Default::default(),
-            definitions: map! {
-                format!("__{}__", TARGET.architecture).into() => int(1),
-                format!("__{}__", TARGET.operating_system).into() => int(1),
-                "__STDC__".into() => int(1),
-                "__STDC_HOSTED__".into() => int(1),
-                "__STDC_VERSION__".into() => int(2011_12),
-                "__STDC_NO_ATOMICS__".into() => int(1),
-                "__STDC_NO_COMPLEX__".into() => int(1),
-                "__STDC_NO_THREADS__".into() => int(1),
-                "__STDC_NO_VLA__".into() => int(1),
-            },
             error_handler: Default::default(),
             nested_ifs: Default::default(),
             pending: Default::default(),
+            definitions,
             files,
             search_path,
         }
@@ -381,7 +482,7 @@ impl<'a> PreProcessor<'a> {
                 other => other.map(Locatable::from),
             }
         } else {
-            next_token.map(Locatable::from)
+            next_token.map(Locatable::from).map_err(|err| err.into())
         })
     }
     // this function does _not_ perform macro substitution

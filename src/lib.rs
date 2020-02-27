@@ -6,7 +6,7 @@
 #![deny(unsafe_code)]
 #![deny(unused_extern_crates)]
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -41,7 +41,7 @@ pub type Product = <ObjectBackend as Backend>::Product;
 
 use data::prelude::CompileError;
 pub use data::prelude::*;
-pub use lex::PreProcessor;
+pub use lex::{Definition, PreProcessor, PreProcessorBuilder};
 pub use parse::Parser;
 
 #[macro_use]
@@ -76,7 +76,7 @@ impl From<VecDeque<CompileError>> for Error {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Opt {
     /// If set, print all tokens found by the lexer in addition to compiling.
     pub debug_lex: bool,
@@ -96,6 +96,9 @@ pub struct Opt {
 
     /// The directories to consider as part of the search path.
     pub search_path: Vec<PathBuf>,
+
+    /// The pre-defined macros to have as part of the preprocessor.
+    pub definitions: HashMap<InternedStr, Definition>,
 }
 
 /// Preprocess the source and return the tokens.
@@ -109,7 +112,7 @@ pub struct Opt {
 #[allow(clippy::type_complexity)]
 pub fn preprocess(
     buf: &str,
-    opt: &Opt,
+    opt: Opt,
     file: FileId,
     files: &mut Files,
 ) -> (
@@ -117,7 +120,7 @@ pub fn preprocess(
     VecDeque<CompileWarning>,
 ) {
     let path = opt.search_path.iter().map(|p| p.into());
-    let mut cpp = PreProcessor::new(file, buf, opt.debug_lex, path, files);
+    let mut cpp = PreProcessor::new(file, buf, opt.debug_lex, path, opt.definitions, files);
 
     let mut tokens = VecDeque::new();
     let mut errs = VecDeque::new();
@@ -143,7 +146,7 @@ pub fn compile(
     files: &mut Files,
 ) -> (Result<Product, Error>, VecDeque<CompileWarning>) {
     let path = opt.search_path.iter().map(|p| p.into());
-    let mut cpp = PreProcessor::new(file, buf, opt.debug_lex, path, files);
+    let mut cpp = PreProcessor::new(file, buf, opt.debug_lex, path, HashMap::default(), files);
 
     let mut errs = VecDeque::new();
 
