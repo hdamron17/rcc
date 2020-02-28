@@ -7,9 +7,11 @@ use super::data::{error::LexError, lex::*, prelude::*};
 use super::intern::InternedStr;
 
 mod cpp;
-pub use cpp::{PreProcessor, PreProcessorBuilder};
 #[cfg(test)]
 mod tests;
+// https://github.com/rust-lang/rust/issues/64762
+//#[allow(unreachable_pub)]
+pub use cpp::{Definition, PreProcessor, PreProcessorBuilder};
 
 /// A Lexer takes the source code and turns it into tokens with location information.
 ///

@@ -59,7 +59,11 @@ OPTIONS:
     -o, --output <output>    The output file to use. [default: a.out]
         --max-errors <max>   The maximum number of errors to allow before giving up.
                              Use 0 to allow unlimited errors. [default: 10]
-    -I, --include <dir>      Add a directory to the local include path (`#include \"file.h\"`)
+    -I, --include <dir>      Add a directory to the local include path (`#include \"file.h\"`).
+                              Can be specified multiple times to add multiple directories.
+    -D, --define <id[=val]>  Define an object-like macro.
+                              Can be specified multiple times to add multiple macros.
+                              `val` defaults to `1`.
 
 ARGS:
     <file>    The file to read C source from. \"-\" means stdin (use ./- to read a file called '-').
@@ -67,7 +71,7 @@ ARGS:
 
 const USAGE: &str = "\
 usage: rcc [--help] [--version | -V] [--debug-asm] [--debug-ast | -a]
-           [--debug-lex] [--jit] [--no-link | -c] [-I <dir>] [<file>]";
+           [--debug-lex] [--jit] [--no-link | -c] [-I <dir>] [-D <id[=val]>] [<file>]";
 
 struct BinOpt {
     /// The options that will be passed to `compile()`
@@ -88,7 +92,7 @@ fn real_main(
     buf: Rc<str>,
     file_db: &mut Files,
     file_id: FileId,
-    opt: &BinOpt,
+    opt: BinOpt,
     output: &Path,
 ) -> Result<(), Error> {
     env_logger::init();
@@ -96,7 +100,7 @@ fn real_main(
     let opt = if opt.preprocess_only {
         use std::io::{BufWriter, Write};
 
-        let (tokens, warnings) = preprocess(&buf, &opt.opt, file_id, file_db);
+        let (tokens, warnings) = preprocess(&buf, opt.opt, file_id, file_db);
         handle_warnings(warnings, file_db);
 
         let stdout = io::stdout();
@@ -108,12 +112,12 @@ fn real_main(
 
         return Ok(());
     } else {
-        &opt.opt
+        opt.opt
     };
     #[cfg(feature = "jit")]
     {
         if !opt.jit {
-            aot_main(&buf, &opt, file_id, file_db, output)
+            aot_main(&buf, opt, file_id, file_db, output)
         } else {
             let module = rcc::initialize_jit_module();
             let (result, warnings) = compile(module, &buf, &opt, file_id, file_db);
@@ -126,23 +130,24 @@ fn real_main(
         }
     }
     #[cfg(not(feature = "jit"))]
-    aot_main(&buf, &opt, file_id, file_db, output)
+    aot_main(&buf, opt, file_id, file_db, output)
 }
 
 #[inline]
 fn aot_main(
     buf: &str,
-    opt: &Opt,
+    opt: Opt,
     file_id: FileId,
     file_db: &mut Files,
     output: &Path,
 ) -> Result<(), Error> {
+    let no_link = opt.no_link;
     let module = rcc::initialize_aot_module("rccmain".to_owned());
     let (result, warnings) = compile(module, buf, opt, file_id, file_db);
     handle_warnings(warnings, file_db);
 
     let product = result.map(|x| x.finish())?;
-    if opt.no_link {
+    if no_link {
         return assemble(product, output);
     }
     let tmp_file = NamedTempFile::new()?;
@@ -204,8 +209,9 @@ fn main() {
 
     let mut file_db = Files::new();
     let file_id = file_db.add(&opt.filename, source);
-    real_main(buf, &mut file_db, file_id, &opt, &output)
-        .unwrap_or_else(|err| err_exit(err, opt.opt.max_errors, &file_db));
+    let max_errors = opt.opt.max_errors;
+    real_main(buf, &mut file_db, file_id, opt, &output)
+        .unwrap_or_else(|err| err_exit(err, max_errors, &file_db));
 }
 
 fn os_str_to_path_buf(os_str: &OsStr) -> Result<PathBuf, bool> {
@@ -218,6 +224,8 @@ macro_rules! type_sizes {
     };
 }
 fn parse_args() -> Result<(BinOpt, PathBuf), pico_args::Error> {
+    use std::collections::HashMap;
+
     let mut input = Arguments::from_env();
     if input.contains(["-h", "--help"]) {
         println!("{}", HELP);
@@ -258,6 +266,18 @@ fn parse_args() -> Result<(BinOpt, PathBuf), pico_args::Error> {
     {
         search_path.push(include);
     }
+    let mut definitions = HashMap::new();
+    while let Some(arg) = input.opt_value_from_str::<_, String>(["-D", "--define"])? {
+        use std::convert::TryInto;
+
+        let mut iter = arg.splitn(2, '=');
+        let key = iter.next().unwrap();
+        let val = iter.next().unwrap_or("1");
+        let def = val
+            .try_into()
+            .expect("error handling for defines not implemented");
+        definitions.insert(key.into(), def);
+    }
     Ok((
         BinOpt {
             preprocess_only: input.contains(["-E", "--preprocess-only"]),
@@ -269,6 +289,7 @@ fn parse_args() -> Result<(BinOpt, PathBuf), pico_args::Error> {
                 #[cfg(feature = "jit")]
                 jit: input.contains("--jit"),
                 max_errors,
+                definitions,
                 search_path,
             },
             filename: input
