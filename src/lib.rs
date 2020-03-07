@@ -44,7 +44,6 @@ pub type Product = <ObjectBackend as Backend>::Product;
 
 use data::prelude::CompileError;
 pub use data::prelude::*;
-// https://github.com/rust-lang/rust/issues/64762
 pub use lex::{Definition, PreProcessor, PreProcessorBuilder};
 pub use parse::Parser;
 
