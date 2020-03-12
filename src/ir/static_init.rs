@@ -5,14 +5,12 @@ use std::convert::{TryFrom, TryInto};
 
 use cranelift::codegen::ir::types;
 use cranelift_module::{Backend, DataContext, DataId, Linkage};
+use target_lexicon::Triple;
 
 use super::{Compiler, Id};
-use crate::arch::{PTR_SIZE, TARGET};
+use crate::arch::TARGET;
 use crate::data::prelude::*;
 use crate::data::{lex::Literal, types::ArrayType, Initializer, StorageClass};
-
-const_assert!(PTR_SIZE <= std::usize::MAX as u16);
-const ZERO_PTR: [u8; PTR_SIZE as usize] = [0; PTR_SIZE as usize];
 
 impl<B: Backend> Compiler<B> {
     pub(super) fn store_static(
@@ -29,7 +27,7 @@ impl<B: Backend> Compiler<B> {
         let linkage = symbol.storage_class.try_into().map_err(err_closure)?;
         let align = symbol
             .ctype
-            .alignof()
+            .alignof(&self.target)
             .map_err(|err| err.to_string())
             .and_then(|size| {
                 size.try_into()
@@ -74,7 +72,7 @@ impl<B: Backend> Compiler<B> {
                     *size = ArrayType::Fixed(len.try_into().unwrap());
                 };
             }
-            let size_t = symbol.ctype.sizeof().map_err(|err| Locatable {
+            let size_t = symbol.ctype.sizeof(&self.target).map_err(|err| Locatable {
                 data: err.to_string(),
                 location,
             })?;
@@ -89,7 +87,7 @@ impl<B: Backend> Compiler<B> {
             ctx.define_zeroinit(
                 symbol
                     .ctype
-                    .sizeof()
+                    .sizeof(&self.target)
                     .map_err(|err| err_closure(err.to_string()))? as usize,
             );
         };
@@ -140,7 +138,8 @@ impl<B: Backend> Compiler<B> {
         offset: u32,
         expr: Expr,
     ) -> CompileResult<()> {
-        let expr = expr.const_fold()?;
+        let expr = expr.const_fold(&self.target)?;
+        let zero_ptr = vec![0; self.target.pointer_width().unwrap().bytes().into()];
         // static address-of
         match expr.expr {
             ExprType::StaticRef(inner) => match inner.expr {
@@ -150,12 +149,12 @@ impl<B: Backend> Compiler<B> {
                     let str_addr = self.module.declare_data_in_data(str_id, ctx);
                     ctx.write_data_addr(offset, str_addr, 0);
                 }
-                ExprType::Literal(ref token) if token.is_zero() => buf.copy_from_slice(&ZERO_PTR),
-                ExprType::Cast(ref inner) if inner.is_zero() => buf.copy_from_slice(&ZERO_PTR),
+                ExprType::Literal(ref token) if token.is_zero() => buf.copy_from_slice(&zero_ptr),
+                ExprType::Cast(ref inner) if inner.is_zero() => buf.copy_from_slice(&zero_ptr),
                 ExprType::Member(struct_expr, member) => {
                     let member_offset = struct_expr
                         .ctype
-                        .member_offset(member)
+                        .member_offset(member, &self.target)
                         .expect("parser shouldn't allow Member for non-struct types");
                     if let ExprType::Id(symbol) = struct_expr.expr {
                         self.static_ref(symbol, member_offset.try_into().unwrap(), offset, ctx);
@@ -169,8 +168,12 @@ impl<B: Backend> Compiler<B> {
                 _ => semantic_err!("cannot take the address of an rvalue".into(), expr.location),
             },
             ExprType::Literal(token) => {
-                let bytes =
-                    token.into_bytes(&expr.ctype, &expr.location, &mut self.error_handler)?;
+                let bytes = token.into_bytes(
+                    &expr.ctype,
+                    &expr.location,
+                    &self.target,
+                    &mut self.error_handler,
+                )?;
                 buf.copy_from_slice(&bytes);
             }
             _ => semantic_err!(
@@ -242,7 +245,7 @@ impl<B: Backend> Compiler<B> {
                     {
                         let size_host: usize = member
                             .ctype
-                            .sizeof()
+                            .sizeof(&self.target)
                             .map_err(|err| CompileError::semantic(location.with(err.to_string())))?
                             .try_into()
                             .expect("cannot initialize struct larger than u32");
@@ -284,7 +287,7 @@ impl<B: Backend> Compiler<B> {
             );
         }
         let inner_size: usize = inner_type
-            .sizeof()
+            .sizeof(&self.target)
             .map_err(|err| Locatable {
                 data: err.to_string(),
                 location: *location,
@@ -343,9 +346,10 @@ impl Literal {
         self,
         ctype: &Type,
         location: &Location,
+        target: &Triple,
         error_handler: &mut ErrorHandler,
     ) -> CompileResult<Box<[u8]>> {
-        let ir_type = ctype.as_ir_type();
+        let ir_type = ctype.as_ir_type(target);
         let big_endian = TARGET
             .endianness()
             .expect("target should be big or little endian")

@@ -1,5 +1,6 @@
+use target_lexicon::Triple;
+
 use super::Symbol;
-use crate::arch::SIZE_T;
 use crate::intern::InternedStr;
 pub use struct_ref::{StructRef, StructType};
 
@@ -158,7 +159,7 @@ pub enum Type {
 
 #[derive(Clone, Debug)]
 pub enum ArrayType {
-    Fixed(SIZE_T),
+    Fixed(u64),
     Unbounded,
 }
 
@@ -245,9 +246,9 @@ impl Type {
             _ => false,
         }
     }
-    pub(crate) fn member_offset(&self, member: InternedStr) -> Result<u64, ()> {
+    pub(crate) fn member_offset(&self, member: InternedStr, target: &Triple) -> Result<u64, ()> {
         match self {
-            Type::Struct(stype) => Ok(stype.offset(member)),
+            Type::Struct(stype) => Ok(stype.offset(member, target)),
             Type::Union(_) => Ok(0),
             _ => Err(()),
         }

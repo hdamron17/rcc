@@ -19,6 +19,7 @@ use cranelift::codegen::{
 use cranelift::frontend::Switch;
 use cranelift::prelude::{Block, FunctionBuilder, FunctionBuilderContext, Signature};
 use cranelift_module::{self, Backend, DataId, FuncId, Linkage, Module};
+use target_lexicon::Triple;
 
 enum Id {
     Function(FuncId),
@@ -39,6 +40,7 @@ struct Compiler<T: Backend> {
     // we didn't see a default case
     switches: Vec<(Switch, Option<Block>, Block)>,
     labels: HashMap<InternedStr, Block>,
+    target: Triple,
     error_handler: ErrorHandler,
 }
 
@@ -99,6 +101,7 @@ impl<B: Backend> Compiler<B> {
             // the initial value doesn't really matter
             last_saw_loop: true,
             strings: Default::default(),
+            target: Triple::host(),
             error_handler: Default::default(),
             debug,
         }
@@ -155,7 +158,7 @@ impl<B: Backend> Compiler<B> {
             )?;
             return Ok(());
         }
-        let u64_size = match decl.symbol.ctype.sizeof() {
+        let u64_size = match decl.symbol.ctype.sizeof(&self.target) {
             Ok(size) => size,
             Err(err) => {
                 return Err(CompileError::semantic(Locatable {
@@ -195,7 +198,9 @@ impl<B: Backend> Compiler<B> {
                 let val = self.compile_expr(*expr, builder)?;
                 // TODO: replace with `builder.ins().stack_store(val.ir_val, stack_slot, 0);`
                 // when Cranelift implements stack_store for i8 and i16
-                let addr = builder.ins().stack_addr(Type::ptr_type(), stack_slot, 0);
+                let addr = builder
+                    .ins()
+                    .stack_addr(Type::ptr_type(&self.target), stack_slot, 0);
                 builder.ins().store(MemFlags::new(), val.ir_val, addr, 0);
             }
             Initializer::InitializerList(_) => unimplemented!("aggregate dynamic initialization"),
@@ -216,12 +221,12 @@ impl<B: Backend> Compiler<B> {
         let ir_vals: Vec<_> = params
             .iter()
             .map(|param| {
-                let ir_type = param.ctype.as_ir_type();
+                let ir_type = param.ctype.as_ir_type(&self.target);
                 Ok(builder.append_block_param(func_start, ir_type))
             })
             .collect::<CompileResult<_>>()?;
         for (param, ir_val) in params.into_iter().zip(ir_vals) {
-            let u64_size = match param.ctype.sizeof() {
+            let u64_size = match param.ctype.sizeof(&self.target) {
                 Err(data) => semantic_err!(data.into(), *location),
                 Ok(size) => size,
             };
@@ -245,7 +250,9 @@ impl<B: Backend> Compiler<B> {
             // stores for i8 and i16
             // then this can be replaced with `builder.ins().stack_store(ir_val, slot, 0);`
             // See https://github.com/CraneStation/cranelift/issues/433
-            let addr = builder.ins().stack_addr(Type::ptr_type(), slot, 0);
+            let addr = builder
+                .ins()
+                .stack_addr(Type::ptr_type(&self.target), slot, 0);
             builder.ins().store(MemFlags::new(), ir_val, addr, 0);
             self.scope.insert(param.id, Id::Local(slot));
         }
@@ -281,7 +288,7 @@ impl<B: Backend> Compiler<B> {
         self.compile_all(stmts, &mut builder)?;
         if !builder.is_filled() {
             if id == InternedStr::get_or_intern("main") {
-                let ir_int = func_type.return_type.as_ir_type();
+                let ir_int = func_type.return_type.as_ir_type(&self.target);
                 let zero = [builder.ins().iconst(ir_int, 0)];
                 builder.ins().return_(&zero);
             } else if should_ret {

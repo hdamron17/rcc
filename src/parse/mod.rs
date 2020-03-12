@@ -8,6 +8,8 @@ use std::iter::Iterator;
 use std::mem;
 use std::rc::Rc;
 
+use target_lexicon::Triple;
+
 use crate::data::{prelude::*, Scope};
 
 type Lexeme = CompileResult<Locatable<Token>>;
@@ -60,6 +62,8 @@ pub struct Parser<I: Iterator<Item = Lexeme>> {
     current_function: Option<FunctionData>,
     /// whether to debug each declaration
     debug: bool,
+    /// Which platform are we compiling for?
+    target: Triple,
     /// Internal API which makes it easier to return errors lazily
     error_handler: ErrorHandler,
     /// Internal API which prevents segfaults due to stack overflow
@@ -99,6 +103,8 @@ where
             next: None,
             current_function: None,
             debug,
+            // TODO: allow cross-compilation
+            target: Triple::host(),
             error_handler: ErrorHandler::new(),
             recursion_guard: Default::default(),
         }

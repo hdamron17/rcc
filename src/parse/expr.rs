@@ -1,5 +1,6 @@
+use target_lexicon::Triple;
+
 use super::{Lexeme, Parser, SyntaxResult};
-use crate::arch::SIZE_T;
 use crate::data::prelude::*;
 use crate::data::{
     lex::{AssignmentToken, ComparisonToken, Keyword},
@@ -46,7 +47,7 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
         self.left_associative_binary_op(
             Self::assignment_expr,
             &[&Token::Comma],
-            |left, right, token| {
+            |left, right, token, _| {
                 let right = right.rval();
                 Ok(Expr {
                     ctype: right.ctype.clone(),
@@ -152,8 +153,8 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
             self.expect(Token::Colon)?;
             let mut otherwise = self.conditional_expr()?.rval();
             if then.ctype.is_arithmetic() && otherwise.ctype.is_arithmetic() {
-                let (tmp1, tmp2) =
-                    Expr::binary_promote(then, otherwise).recover(&mut self.error_handler);
+                let (tmp1, tmp2) = Expr::binary_promote(then, otherwise, &self.target)
+                    .recover(&mut self.error_handler);
                 then = tmp1;
                 otherwise = tmp2;
             } else if !Type::pointer_promote(&mut then, &mut otherwise) {
@@ -340,25 +341,25 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
         self.left_associative_binary_op(
             Self::multiplicative_expr,
             &[&Token::Plus, &Token::Minus],
-            |mut left, mut right, token| {
+            |mut left, mut right, token, target| {
                 match (&left.ctype, &right.ctype) {
                     (Type::Pointer(to), i)
                     | (Type::Array(to, _), i) if i.is_integral() && to.is_complete() => {
                         let to = to.clone();
                         let (left, right) = (left.rval(), right.rval());
-                        return Expr::pointer_arithmetic(left, right, &*to, token.location);
+                        return Expr::pointer_arithmetic(left, right, &*to, token.location, target);
                     }
                     (i, Type::Pointer(to))
                         // `i - p` for pointer p is not valid
                     | (i, Type::Array(to, _)) if i.is_integral() && token.data == Token::Plus && to.is_complete() => {
                         let to = to.clone();
                         let (left, right) = (left.rval(), right.rval());
-                        return Expr::pointer_arithmetic(right, left, &*to, token.location);
+                        return Expr::pointer_arithmetic(right, left, &*to, token.location, target);
                     }
                     _ => {}
                 };
                 let (ctype, lval) = if left.ctype.is_arithmetic() && right.ctype.is_arithmetic() {
-                    let tmp = Expr::binary_promote(*left, *right).map_err(flatten)?;
+                    let tmp = Expr::binary_promote(*left, *right, target).map_err(flatten)?;
                     *left = tmp.0;
                     right = Box::new(tmp.1);
                     (left.ctype.clone(), false)
@@ -401,7 +402,7 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
         self.left_associative_binary_op(
             Self::cast_expr,
             &[&Token::Star, &Token::Divide, &Token::Mod],
-            |left, right, token| {
+            |left, right, token, target| {
                 if token.data == Token::Mod
                     && !(left.ctype.is_integral() && right.ctype.is_integral())
                 {
@@ -417,7 +418,7 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
                             token.data, left.ctype, right.ctype
                         ))), *left));
                 }
-                let (p_left, right) = Expr::binary_promote(*left, *right).map_err(flatten)?;
+                let (p_left, right) = Expr::binary_promote(*left, *right, target).map_err(flatten)?;
                 Ok(Expr {
                     ctype: p_left.ctype.clone(),
                     location: token.location,
@@ -631,7 +632,9 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
                             );
                             Ok(expr)
                         } else {
-                            let expr = expr.integer_promote().recover(&mut self.error_handler);
+                            let expr = expr
+                                .integer_promote(&self.target)
+                                .recover(&mut self.error_handler);
                             Ok(Expr {
                                 lval: false,
                                 location,
@@ -647,7 +650,9 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
                             );
                             Ok(expr)
                         } else {
-                            let expr = expr.integer_promote().recover(&mut self.error_handler);
+                            let expr = expr
+                                .integer_promote(&self.target)
+                                .recover(&mut self.error_handler);
                             Ok(Expr {
                                 lval: false,
                                 ctype: expr.ctype.clone(),
@@ -665,7 +670,9 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
                             );
                             Ok(expr)
                         } else {
-                            let expr = expr.integer_promote().recover(&mut self.error_handler);
+                            let expr = expr
+                                .integer_promote(&self.target)
+                                .recover(&mut self.error_handler);
                             Ok(Expr {
                                 lval: false,
                                 ctype: expr.ctype.clone(),
@@ -717,8 +724,14 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
                             continue;
                         }
                     };
-                    let mut addr = Expr::pointer_arithmetic(array, index, &target_type, location)
-                        .recover(&mut self.error_handler);
+                    let mut addr = Expr::pointer_arithmetic(
+                        array,
+                        index,
+                        &target_type,
+                        location,
+                        &self.target,
+                    )
+                    .recover(&mut self.error_handler);
                     addr.ctype = target_type;
                     addr.lval = true;
                     addr
@@ -772,7 +785,7 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
                     for (i, arg) in args.into_iter().enumerate() {
                         let maybe_err = match functype.params.get(i) {
                             Some(expected) => arg.rval().cast(&expected.ctype),
-                            None => arg.default_promote(),
+                            None => arg.default_promote(&self.target),
                         };
                         let promoted = maybe_err.recover(&mut self.error_handler);
                         promoted_args.push(promoted);
@@ -989,7 +1002,7 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
         E: Fn(Box<Expr>, Box<Expr>) -> Result<ExprType, (Locatable<SemanticError>, Expr)>,
         G: Fn(&mut Self) -> SyntaxResult,
     {
-        self.left_associative_binary_op(next_grammar_func, &[token], move |left, right, token| {
+        self.left_associative_binary_op(next_grammar_func, &[token], move |left, right, token, _| {
             let non_scalar = if !left.ctype.is_scalar() {
                 Some(left.ctype.clone())
             } else if !right.ctype.is_scalar() {
@@ -1035,7 +1048,7 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
         E: Fn(Expr, Expr, Locatable<Token>) -> RecoverableResult<Expr, Locatable<SemanticError>>,
         G: Fn(&mut Self) -> SyntaxResult,
     {
-        self.left_associative_binary_op(next_grammar_func, tokens, |expr, next, token| {
+        self.left_associative_binary_op(next_grammar_func, tokens, |expr, next, token, target| {
             let non_scalar = if !expr.ctype.is_integral() {
                 Some(&expr.ctype)
             } else if !next.ctype.is_integral() {
@@ -1055,7 +1068,8 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
                     *expr,
                 ));
             }
-            let (promoted_expr, next) = Expr::binary_promote(*expr, *next).map_err(flatten)?;
+            let (promoted_expr, next) =
+                Expr::binary_promote(*expr, *next, target).map_err(flatten)?;
             expr_func(promoted_expr, next, token)
         })
     }
@@ -1081,13 +1095,14 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
             Box<Expr>,
             Box<Expr>,
             Locatable<Token>,
+            &Triple,
         ) -> RecoverableResult<Expr, Locatable<SemanticError>>,
         G: Fn(&mut Self) -> SyntaxResult,
     {
         let mut expr = next_grammar_func(self)?;
         while let Some(locatable) = self.match_any(tokens) {
             let next = next_grammar_func(self)?;
-            match expr_func(Box::new(expr), Box::new(next), locatable) {
+            match expr_func(Box::new(expr), Box::new(next), locatable, &self.target) {
                 Ok(combined) => expr = combined,
                 Err((err, original)) => {
                     expr = original;
@@ -1219,17 +1234,17 @@ impl Expr {
             _ => self,
         }
     }
-    fn default_promote(self) -> RecoverableResult<Expr, Locatable<SemanticError>> {
+    fn default_promote(self, target: &Triple) -> RecoverableResult<Expr, Locatable<SemanticError>> {
         let expr = self.rval();
-        let ctype = expr.ctype.clone().default_promote();
+        let ctype = expr.ctype.clone().default_promote(target);
         expr.cast(&ctype)
     }
     // Perform an integer conversion, including all relevant casts.
     //
     // See `Type::integer_promote` for conversion rules.
-    fn integer_promote(self) -> RecoverableResult<Expr, Locatable<SemanticError>> {
+    fn integer_promote(self, target: &Triple) -> RecoverableResult<Expr, Locatable<SemanticError>> {
         let expr = self.rval();
-        let ctype = expr.ctype.clone().integer_promote();
+        let ctype = expr.ctype.clone().integer_promote(target);
         expr.cast(&ctype)
     }
     // Perform a binary conversion, including all relevant casts.
@@ -1238,9 +1253,10 @@ impl Expr {
     fn binary_promote(
         left: Expr,
         right: Expr,
+        target: &Triple,
     ) -> RecoverableResult<(Expr, Expr), Locatable<SemanticError>> {
         let (left, right) = (left.rval(), right.rval());
-        let ctype = Type::binary_promote(left.ctype.clone(), right.ctype.clone());
+        let ctype = Type::binary_promote(left.ctype.clone(), right.ctype.clone(), target);
         match (left.cast(&ctype), right.cast(&ctype)) {
             (Ok(left_cast), Ok(right_cast)) => Ok((left_cast, right_cast)),
             (Err((err, left)), Ok(right)) | (Ok(left), Err((err, right)))
@@ -1349,6 +1365,7 @@ impl Expr {
         index: Expr,
         pointee: &Type,
         location: Location,
+        target: &Triple,
     ) -> RecoverableResult<Expr, Locatable<SemanticError>> {
         let offset = Expr {
             lval: false,
@@ -1358,7 +1375,7 @@ impl Expr {
             ctype: base.ctype.clone(),
         }
         .rval();
-        let size = match pointee.sizeof() {
+        let size = match pointee.sizeof(target) {
             Ok(s) => s,
             Err(_) => {
                 return Err((
@@ -1475,13 +1492,14 @@ impl Expr {
         mut left: Box<Expr>,
         mut right: Box<Expr>,
         token: Locatable<Token>,
+        target: &Triple,
     ) -> RecoverableResult<Expr, Locatable<SemanticError>> {
         let token = match token.data {
             Token::Comparison(c) => token.location.with(c),
             _ => unreachable!("bad use of relational_expr"),
         };
         if left.ctype.is_arithmetic() && right.ctype.is_arithmetic() {
-            let tmp = Expr::binary_promote(*left, *right).map_err(flatten)?;
+            let tmp = Expr::binary_promote(*left, *right, target).map_err(flatten)?;
             *left = tmp.0;
             right = Box::new(tmp.1);
         } else {
@@ -1541,7 +1559,7 @@ impl From<(Literal, Location)> for Expr {
             Literal::Int(_) => Type::Long(true),
             Literal::UnsignedInt(_) => Type::Long(false),
             Literal::Float(_) => Type::Double,
-            Literal::Str(s) => Type::for_string_literal(s.len() as SIZE_T),
+            Literal::Str(s) => Type::for_string_literal(s.len() as u64),
         };
         Expr {
             constexpr: true,
@@ -1602,18 +1620,18 @@ impl Type {
         }
     }
     // Perform the 'default promotions' from 6.5.2.2.6
-    fn default_promote(self) -> Type {
+    fn default_promote(self, target: &Triple) -> Type {
         if self.is_integral() {
-            self.integer_promote()
+            self.integer_promote(target)
         } else if self == Type::Float {
             Type::Double
         } else {
             self
         }
     }
-    fn integer_promote(self) -> Type {
+    fn integer_promote(self, target: &Triple) -> Type {
         if self.rank() <= Type::Int(true).rank() {
-            if Type::Int(true).can_represent(&self) {
+            if Type::Int(true).can_represent(&self, target) {
                 Type::Int(true)
             } else {
                 Type::Int(false)
@@ -1639,15 +1657,15 @@ impl Type {
     ///
     /// Trying to promote derived types (pointers, functions, etc.) is an error.
     /// Pointer arithmetic should not promote either argument, see 6.5.6 of the C standard.
-    fn binary_promote(mut left: Type, mut right: Type) -> Type {
+    fn binary_promote(mut left: Type, mut right: Type, target: &Triple) -> Type {
         use Type::*;
         if left == Double || right == Double {
             return Double; // toil and trouble
         } else if left == Float || right == Float {
             return Float;
         }
-        left = left.integer_promote();
-        right = right.integer_promote();
+        left = left.integer_promote(target);
+        right = right.integer_promote(target);
         let signs = (left.sign(), right.sign());
         // same sign
         if signs.0 == signs.1 {
@@ -1662,7 +1680,7 @@ impl Type {
         } else {
             (right, left)
         };
-        if signed.can_represent(&unsigned) {
+        if signed.can_represent(&unsigned, target) {
             signed
         } else {
             unsigned
@@ -1725,7 +1743,7 @@ impl Type {
             _ => std::usize::MAX,
         }
     }
-    fn for_string_literal(len: SIZE_T) -> Type {
+    fn for_string_literal(len: u64) -> Type {
         Type::Array(Box::new(Type::Char(true)), ArrayType::Fixed(len))
     }
 }

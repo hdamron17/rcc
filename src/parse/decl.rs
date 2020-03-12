@@ -3,8 +3,10 @@ use std::convert::TryFrom;
 use std::iter::{FromIterator, Iterator};
 use std::mem;
 
+use target_lexicon::Triple;
+
 use super::{FunctionData, Lexeme, Parser, SyntaxResult, TagEntry};
-use crate::arch::SIZE_T;
+use crate::arch::Arch;
 use crate::data::{
     lex::Keyword,
     prelude::*,
@@ -610,11 +612,14 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
                 _ => unreachable!("expect is broken"),
             };
             if self.match_next(&Token::EQUAL).is_some() {
-                let constant = self.constant_expr()?.constexpr().unwrap_or_else(|err| {
-                    let location = err.location();
-                    self.error_handler.push_back(err);
-                    location.with((Literal::Int(-1), Type::Error))
-                });
+                let constant = self
+                    .constant_expr()?
+                    .constexpr(&self.target)
+                    .unwrap_or_else(|err| {
+                        let location = err.location();
+                        self.error_handler.push_back(err);
+                        location.with((Literal::Int(-1), Type::Error))
+                    });
                 current = match constant.data.0 {
                     Literal::Int(i) => i,
                     Literal::UnsignedInt(u) => match i64::try_from(u) {
@@ -760,11 +765,14 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
             Ok(constructor(StructType::Anonymous(Rc::new(members))))
         }
     }
-    fn bitfield(&mut self) -> SyntaxResult<SIZE_T> {
-        Ok(self.constant_expr()?.const_int().unwrap_or_else(|err| {
-            self.error_handler.push_back(err);
-            1
-        }))
+    fn bitfield(&mut self) -> SyntaxResult<u64> {
+        Ok(self
+            .constant_expr()?
+            .const_int(&self.target)
+            .unwrap_or_else(|err| {
+                self.error_handler.push_back(err);
+                1
+            }))
     }
     /*
     struct_declarator_list: struct_declarator (',' struct_declarator)* ;
@@ -807,14 +815,14 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
             };
             if let Some(token) = self.match_next(&Token::Colon) {
                 let bit_size = self.bitfield()?;
-                let type_size = symbol.ctype.sizeof().unwrap_or(0);
+                let type_size = symbol.ctype.sizeof(&self.target).unwrap_or(0);
                 if bit_size == 0 {
                     let err = format!(
                         "C does not have zero-sized types. hint: omit the declarator {}",
                         symbol.id
                     );
                     self.semantic_err(err, self.last_location);
-                } else if bit_size > type_size * u64::from(crate::arch::CHAR_BIT) {
+                } else if bit_size > type_size * u64::from(self.target.char_bit()) {
                     let err = format!(
                         "cannot have bitfield {} with size {} larger than containing type {}",
                         symbol.id, bit_size, symbol.ctype
@@ -1043,7 +1051,7 @@ impl<I: Iterator<Item = Lexeme>> Parser<I> {
 
                         let expr = self.constant_expr()?;
                         self.expect(Token::RightBracket)?;
-                        let length = expr.const_int().unwrap_or_else(|err| {
+                        let length = expr.const_int(&self.target).unwrap_or_else(|err| {
                             self.error_handler.push_back(err);
                             1
                         });
@@ -1601,12 +1609,12 @@ impl From<LengthError> for &'static str {
 }
 
 impl Expr {
-    fn const_int(self) -> CompileResult<SIZE_T> {
+    fn const_int(self, target: &Triple) -> CompileResult<u64> {
         use std::convert::TryInto;
         if !self.ctype.is_integral() {
             semantic_err!(LengthError::NonIntegral.into(), self.location,);
         }
-        let literal = self.constexpr()?;
+        let literal = self.constexpr(target)?;
         match literal.data.0 {
             Literal::UnsignedInt(u) => Ok(u),
             Literal::Int(x) => x.try_into().map_err(|_| {
