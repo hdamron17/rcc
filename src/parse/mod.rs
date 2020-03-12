@@ -92,7 +92,7 @@ where
     /// I would rather ensure `I` has at least one token,
     /// but I don't know a good way to do that without requiring users to
     /// use `std::iter::once`.
-    pub fn new(first: Locatable<Token>, tokens: I, debug: bool) -> Self {
+    pub fn new(first: Locatable<Token>, tokens: I, target: Triple, debug: bool) -> Self {
         Parser {
             scope: Default::default(),
             tag_scope: Default::default(),
@@ -103,8 +103,7 @@ where
             next: None,
             current_function: None,
             debug,
-            // TODO: allow cross-compilation
-            target: Triple::host(),
+            target,
             error_handler: ErrorHandler::new(),
             recursion_guard: Default::default(),
         }
@@ -405,7 +404,7 @@ pub(crate) mod tests {
     use crate::lex::PreProcessor as Lexer;
 
     pub(crate) use super::expr::tests::parse_expr;
-    use super::Parser;
+    use super::{Parser, Triple};
 
     pub(crate) type ParseType = CompileResult<Locatable<Declaration>>;
     pub(crate) fn parse(input: &str) -> Option<ParseType> {
@@ -467,7 +466,7 @@ pub(crate) mod tests {
     pub(crate) fn parser(input: &str) -> Parser<Lexer> {
         let mut lexer = cpp(input);
         let first = lexer.next().unwrap().unwrap();
-        Parser::new(first, lexer, false)
+        Parser::new(first, lexer, Triple::host(), false)
     }
     #[test]
     fn peek() {
@@ -520,7 +519,7 @@ pub(crate) mod tests {
             first in any::<Token>(),
             tokens in arb_vec_result_locatable_token()
             ) {
-            let mut parser = Parser::new(Locatable { data: first, location: Location::default() }, tokens.into_iter(), false);
+            let mut parser = Parser::new(Locatable { data: first, location: Location::default() }, tokens.into_iter(), Triple::host(), false);
 
             let peek = parser.peek_token().cloned();
             let next = parser.next_token().map(|l| l.data);
@@ -533,7 +532,7 @@ pub(crate) mod tests {
             first in any::<Token>(),
             tokens in arb_vec_result_locatable_token()
             ) {
-            let mut parser = Parser::new(Locatable { data: first, location: Location::default() }, tokens.into_iter(), false);
+            let mut parser = Parser::new(Locatable { data: first, location: Location::default() }, tokens.into_iter(), Triple::host(), false);
 
             let peek = parser.peek_next_token().cloned();
             parser.next_token();

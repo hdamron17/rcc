@@ -48,11 +48,12 @@ struct Compiler<T: Backend> {
 pub(crate) fn compile<B: Backend>(
     module: Module<B>,
     program: Vec<Locatable<Declaration>>,
+    target: Triple,
     debug: bool,
 ) -> (Result<Module<B>, CompileError>, VecDeque<CompileWarning>) {
     // really we'd like to have all errors but that requires a refactor
     let mut err = None;
-    let mut compiler = Compiler::new(module, debug);
+    let mut compiler = Compiler::new(module, target, debug);
     for decl in program {
         let current = match (decl.data.symbol.ctype.clone(), decl.data.init) {
             (Type::Function(func_type), None) => compiler
@@ -91,7 +92,7 @@ pub(crate) fn compile<B: Backend>(
 }
 
 impl<B: Backend> Compiler<B> {
-    fn new(module: Module<B>, debug: bool) -> Compiler<B> {
+    fn new(module: Module<B>, target: Triple, debug: bool) -> Compiler<B> {
         Compiler {
             module,
             scope: Scope::new(),
@@ -101,7 +102,7 @@ impl<B: Backend> Compiler<B> {
             // the initial value doesn't really matter
             last_saw_loop: true,
             strings: Default::default(),
-            target: Triple::host(),
+            target,
             error_handler: Default::default(),
             debug,
         }

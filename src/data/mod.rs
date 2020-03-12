@@ -530,6 +530,7 @@ impl TryFrom<u32> for Radix {
 mod tests {
     use crate::data::lex::test::cpp;
     use crate::Parser;
+    use target_lexicon::Triple;
 
     #[test]
     fn type_display() {
@@ -545,7 +546,7 @@ mod tests {
         for ty in types.iter() {
             let mut lexer = cpp(ty);
             let first = lexer.next().unwrap().unwrap();
-            let mut parser = Parser::new(first, &mut lexer, false);
+            let mut parser = Parser::new(first, &mut lexer, Triple::host(), false);
 
             let parsed_ty = parser.type_name().unwrap().data.0;
             assert_eq!(&parsed_ty.to_string(), *ty);

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use codespan::FileId;
+use target_lexicon::Triple;
 
 use super::{Lexer, Token};
 use crate::arch::TARGET;
@@ -721,7 +722,7 @@ impl<'a> PreProcessor<'a> {
     fn boolean_expr(&mut self) -> Result<bool, CompileError> {
         // TODO: is this unwrap safe? there should only be scalar types in a cpp directive...
         // TODO: should this use the target arch or the host arch?
-        let target = target_lexicon::Triple::host();
+        let target = Triple::host();
         match self.cpp_expr()?.truthy().unwrap().constexpr(&target)?.data {
             (Literal::Int(i), Type::Bool) => Ok(i != 0),
             _ => unreachable!("bug in const_fold or parser: cpp cond should be boolean"),
@@ -843,7 +844,7 @@ impl<'a> PreProcessor<'a> {
         // TODO: remove(0) is bad and I should feel bad
         // TODO: this only returns the first error because anything else requires a refactor
         let first = cpp_tokens.remove(0)?;
-        let mut parser = crate::Parser::new(first, cpp_tokens.into_iter(), false);
+        let mut parser = crate::Parser::new(first, cpp_tokens.into_iter(), Triple::host(), false);
         // TODO: catch expressions that aren't allowed
         // (see https://github.com/jyn514/rcc/issues/5#issuecomment-575339427)
         // TODO: can semantic errors happen here? should we check?
